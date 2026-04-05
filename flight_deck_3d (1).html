@@ -1,0 +1,210 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap');
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0d0d0d;
+  color: #ccc;
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden;
+  height: 100vh;
+}
+#canvas-container { position: fixed; inset: 0; }
+canvas { display: block; }
+.hud { position: fixed; z-index: 10; }
+.top-bar {
+  top: 16px; left: 16px; right: 16px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.title { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #555; }
+.connect-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+  padding: 6px 14px;
+  border: 1px solid #333;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+}
+.connect-btn:hover { border-color: #666; color: #ccc; }
+.connect-btn.connected { border-color: #4a4; color: #4a4; }
+.readings {
+  bottom: 20px; left: 20px;
+  display: flex; gap: 24px;
+  font-size: 13px;
+}
+.readings .label { color: #444; font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; }
+.readings .val { font-size: 20px; font-weight: 600; margin-top: 2px; }
+.readings .roll .val { color: #5bf; }
+.readings .pitch .val { color: #f84; }
+.readings .yaw .val { color: #5d5; }
+.unit { font-size: 11px; font-weight: 400; color: #444; }
+.mode-label {
+  bottom: 20px; right: 20px;
+  font-size: 10px; color: #333; letter-spacing: 1px;
+}
+.mode-label .live { color: #4a4; }
+</style>
+
+<div id="canvas-container"></div>
+
+<div class="hud top-bar">
+  <div class="title">IMU Flight Viewer</div>
+  <button id="connectBtn" class="connect-btn" onclick="toggleSerial()">Connect</button>
+</div>
+
+<div class="hud readings">
+  <div class="roll"><div class="label">Roll</div><div class="val"><span id="rollVal">0.0</span><span class="unit">°</span></div></div>
+  <div class="pitch"><div class="label">Pitch</div><div class="val"><span id="pitchVal">0.0</span><span class="unit">°</span></div></div>
+  <div class="yaw"><div class="label">Yaw</div><div class="val"><span id="yawVal">0.0</span><span class="unit">°</span></div></div>
+</div>
+
+<div class="hud mode-label" id="modeLabel">DEMO</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+let roll = 0, pitch = 0, yaw = 0;
+let tRoll = 0, tPitch = 0, tYaw = 0;
+let serialConnected = false, reader = null, port = null;
+let demoMode = true, demoTime = 0;
+
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 3, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x0d0d0d);
+container.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0x444444, 1));
+const light = new THREE.DirectionalLight(0xffffff, 0.8);
+light.position.set(3, 5, 4);
+scene.add(light);
+
+const grid = new THREE.GridHelper(20, 20, 0x1a1a1a, 0x141414);
+grid.position.y = -2.5;
+scene.add(grid);
+
+const craft = new THREE.Group();
+const mat = new THREE.MeshLambertMaterial({ color: 0x3a3a3a });
+const accent = new THREE.MeshLambertMaterial({ color: 0x5599ff });
+
+const body = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.25, 3.5), mat);
+craft.add(body);
+
+const nose = new THREE.Mesh(new THREE.ConeGeometry(0.22, 1, 4), mat);
+nose.rotation.x = -Math.PI / 2;
+nose.rotation.y = Math.PI / 4;
+nose.position.z = -2.2;
+craft.add(nose);
+
+const wings = new THREE.Mesh(new THREE.BoxGeometry(5, 0.05, 1), mat);
+wings.position.z = 0.2;
+craft.add(wings);
+
+const tailWing = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.04, 0.5), mat);
+tailWing.position.z = 1.6;
+craft.add(tailWing);
+
+const fin = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.7, 0.6), mat);
+fin.position.set(0, 0.4, 1.5);
+craft.add(fin);
+
+const tipR = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.06, 0.15), accent);
+tipR.position.set(2.5, 0, 0.2);
+craft.add(tipR);
+const tipL = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.06, 0.15), accent);
+tipL.position.set(-2.5, 0, 0.2);
+craft.add(tipL);
+
+scene.add(craft);
+
+async function toggleSerial() {
+  if (serialConnected) { disconnectSerial(); return; }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    serialConnected = true;
+    demoMode = false;
+    document.getElementById('connectBtn').textContent = 'Disconnect';
+    document.getElementById('connectBtn').classList.add('connected');
+    document.getElementById('modeLabel').innerHTML = '<span class="live">LIVE</span>';
+    readSerial();
+  } catch (e) {}
+}
+
+async function disconnectSerial() {
+  serialConnected = false; demoMode = true;
+  if (reader) { try { await reader.cancel(); } catch(e) {} reader = null; }
+  if (port) { try { await port.close(); } catch(e) {} port = null; }
+  document.getElementById('connectBtn').textContent = 'Connect';
+  document.getElementById('connectBtn').classList.remove('connected');
+  document.getElementById('modeLabel').textContent = 'DEMO';
+}
+
+async function readSerial() {
+  const decoder = new TextDecoderStream();
+  port.readable.pipeTo(decoder.writable);
+  reader = decoder.readable.getReader();
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) parseLine(line.trim());
+    }
+  } catch (e) {}
+}
+
+function parseLine(line) {
+  if (line.startsWith('#') || line.length < 5) return;
+  const parts = {};
+  line.split(',').forEach(p => {
+    const [k, v] = p.split(':');
+    if (k && v) parts[k.trim()] = parseFloat(v);
+  });
+  if (!isNaN(parts.R)) tRoll = parts.R;
+  if (!isNaN(parts.P)) tPitch = parts.P;
+  if (!isNaN(parts.Y)) tYaw = parts.Y;
+}
+
+function updateDemo() {
+  demoTime += 0.006;
+  tRoll  = Math.sin(demoTime) * 20;
+  tPitch = Math.sin(demoTime * 0.7) * 12;
+  tYaw   = demoTime * 6 % 360 - 180;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (demoMode) updateDemo();
+
+  roll  += (tRoll  - roll)  * 0.1;
+  pitch += (tPitch - pitch) * 0.1;
+  yaw   += (tYaw   - yaw)   * 0.1;
+
+  craft.rotation.set(0, 0, 0);
+  craft.rotateY(-yaw * Math.PI / 180);
+  craft.rotateX(pitch * Math.PI / 180);
+  craft.rotateZ(-roll * Math.PI / 180);
+
+  document.getElementById('rollVal').textContent  = roll.toFixed(1);
+  document.getElementById('pitchVal').textContent = pitch.toFixed(1);
+  document.getElementById('yawVal').textContent   = yaw.toFixed(1);
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
